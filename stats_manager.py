@@ -1,5 +1,4 @@
 """统计数据的加载、保存与查询管理。"""
-
 from __future__ import annotations
 
 import asyncio
@@ -9,7 +8,6 @@ from tempfile import NamedTemporaryFile
 from typing import Any
 
 from astrbot.api import logger
-
 from config import DEFAULT_KEEP_LATEST_RECORDS
 
 
@@ -26,6 +24,7 @@ class StatsManager:
         user_id: str,
         user_name: str,
         request_time: str,
+        platform: str = "",  # 【修复】：补充缺失的 platform 参数，匹配 main.py 调用
     ) -> int:
         """记录一次请求，返回该用户的累计请求次数。"""
         async with self._data_lock:
@@ -58,7 +57,7 @@ class StatsManager:
             timestamps.append(request_time)
 
             if self._keep_latest_records > 0:
-                user_item["request_timestamps"] = timestamps[-self._keep_latest_records :]
+                user_item["request_timestamps"] = timestamps[-self._keep_latest_records:]
 
             await self._save(data)
             return int(user_item["total_count"])

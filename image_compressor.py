@@ -38,8 +38,13 @@ class ImageCompressor:
                 "请执行: pip install Pillow"
             )
 
-    def compress(self, image_path: str) -> str:
-        """压缩单张图片，返回压缩后的文件路径。"""
+    def compress(self, image_path: str, temp_dir: Path | None = None) -> str:
+        """压缩单张图片，返回压缩后的文件路径.
+        
+        Args:
+            image_path: 原始图片绝对路径。
+            temp_dir: 指定的临时文件存放目录.
+        """
         if not self.enabled or not _PIL_AVAILABLE:
             return image_path
 
@@ -58,7 +63,6 @@ class ImageCompressor:
                 is_resized = new_size != (img.width, img.height)
 
                 if self.quality == 100 and not is_resized:
-                    logger.debug("质量为100且无尺寸变化，跳过重编码: %s", image_path)
                     return image_path
 
                 if original_format == "JPEG" and img.mode in ("RGBA", "P", "LA"):
@@ -68,11 +72,15 @@ class ImageCompressor:
                     img = img.resize(new_size, Image.Resampling.LANCZOS)
 
                 ext = self._format_to_extension(original_format, src_path.suffix.lower())
-                fd, tmp_path = tempfile.mkstemp(suffix=ext)
+                
+                if temp_dir:
+                    temp_dir.mkdir(parents=True, exist_ok=True)
+                    fd, tmp_path = tempfile.mkstemp(suffix=ext, dir=str(temp_dir))
+                else:
+                    fd, tmp_path = tempfile.mkstemp(suffix=ext)
                 os.close(fd)
 
                 save_kwargs: dict[str, Any] = {}
-                
                 if "exif" in img.info:
                     save_kwargs["exif"] = img.info["exif"]
 
@@ -87,11 +95,6 @@ class ImageCompressor:
                     save_kwargs["quality"] = self.quality
 
                 img.save(tmp_path, format=original_format, **save_kwargs)
-
-                logger.info(
-                    "图片压缩完成 | src=%s | dst=%s | size=%sx%s | quality=%s",
-                    image_path, tmp_path, new_size[0], new_size[1], self.quality,
-                )
                 return tmp_path
 
         except Exception as exc:
@@ -99,7 +102,6 @@ class ImageCompressor:
             return image_path
 
     def _calculate_size(self, width: int, height: int) -> tuple[int, int]:
-        """根据 max_width / max_height 计算等比缩放后的尺寸。"""
         if self.max_width <= 0 and self.max_height <= 0:
             return width, height
 
@@ -118,7 +120,6 @@ class ImageCompressor:
 
     @staticmethod
     def _format_to_extension(fmt: str, fallback: str) -> str:
-        """将 PIL 格式映射为文件后缀。"""
         mapping = {
             "JPEG": ".jpg",
             "JPG": ".jpg",

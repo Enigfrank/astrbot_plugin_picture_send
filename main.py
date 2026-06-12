@@ -5,7 +5,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# 将插件目录加入模块搜索路径，确保子模块可被正确导入
 _plugin_dir = Path(__file__).parent.resolve()
 if str(_plugin_dir) not in sys.path:
     sys.path.insert(0, str(_plugin_dir))
@@ -36,7 +35,7 @@ except Exception:
     get_astrbot_data_path = None
 
 
-@register("picture-send", "Enigfrank", "发送作业图片", "1.5.1")
+@register("picture-send", "Enigfrank", "发送作业图片", "1.5.2")
 class MyPlugin(Star):
     """仅适配企业微信微信客服(wecom)的作业图片插件。"""
 
@@ -46,6 +45,14 @@ class MyPlugin(Star):
 
         self._plugin_data_dir = self._build_plugin_data_dir()
         self._stats_file = self._plugin_data_dir / self._get_stats_filename()
+
+        try:
+            from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
+            # 优先使用框架专属临时目录
+            self._safe_temp_dir = Path(get_astrbot_temp_path()) / "homework_compress"
+        except Exception:
+            # 降级使用插件数据目录（属于 workspace 白名单）
+            self._safe_temp_dir = self._plugin_data_dir / "tmp"
 
         self._wecom_corp_id = clean_text(self.config.get("wecom_corp_id", ""))
         self._wecom_kf_secret = clean_text(self.config.get("wecom_kf_secret", ""))
@@ -66,7 +73,6 @@ class MyPlugin(Star):
         self._compression_max_width = int(compression.get("max_width", DEFAULT_COMPRESSION_MAX_WIDTH))
         self._compression_max_height = int(compression.get("max_height", DEFAULT_COMPRESSION_MAX_HEIGHT))
 
-        # 初始化子模块
         self._http = HttpClient()
         self._wecom = WecomClient(
             corp_id=self._wecom_corp_id,
@@ -86,9 +92,9 @@ class MyPlugin(Star):
 
     async def initialize(self):
         logger.info(
-            "作业发送插件初始化完成 | data_dir=%s | stats_file=%s",
+            "作业发送插件初始化完成 | data_dir=%s | safe_temp_dir=%s",
             self._plugin_data_dir,
-            self._stats_file,
+            self._safe_temp_dir,
         )
 
     @filter.command("homework")
@@ -99,7 +105,6 @@ class MyPlugin(Star):
             yield event.plain_result("本插件仅支持企业微信(wecom)")
             return
 
-        # 接入一言 API
         hitokoto_text = ""
         try:
             hitokoto_data = await self._http.get_json("https://v1.hitokoto.cn/", {})
@@ -142,7 +147,6 @@ class MyPlugin(Star):
                 request_time=request_time,
             )
 
-        # 保留结构化日志
         if self._log_enabled:
             log_user_id = mask_user_id(user_id) if self._mask_user_id_enabled else user_id
             logger.info(
@@ -156,14 +160,13 @@ class MyPlugin(Star):
                 )
             )
 
-        # 发送图片并清理临时文件
         for image_path in image_paths:
-            compressed_path = self._compressor.compress(image_path)
+            # 传入安全临时目录
+            compressed_path = self._compressor.compress(image_path, temp_dir=self._safe_temp_dir)
             yield event.image_result(compressed_path)
             if compressed_path != image_path:
                 try:
                     Path(compressed_path).unlink(missing_ok=True)
-                    logger.debug("已清理临时压缩文件: %s", compressed_path)
                 except Exception as exc:
                     logger.warning("清理临时文件失败: %s | error=%s", compressed_path, exc)
 
@@ -182,25 +185,10 @@ class MyPlugin(Star):
 
         nickname = await self._wecom.fetch_user_name(target_user_id)
         if nickname:
-            logger.info(
-                "用户昵称查询 | target_user_id=%s | nickname=%s | platform=%s",
-                mask_user_id(target_user_id) if self._mask_user_id_enabled else target_user_id,
-                nickname,
-                platform,
-            )
-            yield event.plain_result(
-                f"用户ID:{target_user_id}\n微信昵称:{nickname}"
-            )
+            yield event.plain_result(f"用户ID:{target_user_id}\n微信昵称:{nickname}")
             return
 
-        logger.warning(
-            "用户昵称查询失败 | target_user_id=%s | platform=%s",
-            mask_user_id(target_user_id) if self._mask_user_id_enabled else target_user_id,
-            platform,
-        )
-        yield event.plain_result(
-            f"未查询到该用户昵称。\n用户ID：{target_user_id}"
-        )
+        yield event.plain_result(f"未查询到该用户昵称。\n用户ID：{target_user_id}")
 
     @filter.command("homework_stats")
     async def homework_stats(self, event: AstrMessageEvent):
@@ -218,14 +206,11 @@ class MyPlugin(Star):
         lines = ["作业请求统计", f"总请求次数: {total}", f"用户数: {user_count}", ""]
         lines.append("各用户调用明细:")
         for idx, u in enumerate(users, start=1):
-            lines.append(
-                f"{idx}. {u['user_name']} ({u['user_id']}): {u['total_count']} 次"
-            )
+            lines.append(f"{idx}. {u['user_name']} ({u['user_id']}): {u['total_count']} 次")
 
         yield event.plain_result("\n".join(lines))
 
     def _resolve_homework_images(self) -> list[str]:
-        """获取作业文件夹中的所有图片路径。"""
         if not HOMEWORK_BASE_DIR.exists() or not HOMEWORK_BASE_DIR.is_dir():
             return []
 
