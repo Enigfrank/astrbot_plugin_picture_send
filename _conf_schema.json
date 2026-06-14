@@ -81,5 +81,36 @@
         "default": 1080
       }
     }
+  },
+  "error_forward": {
+    "type": "object",
+    "description": "插件错误转发配置",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "是否启用错误转发",
+        "default": false
+      },
+      "target_uid": {
+        "type": "string",
+        "description": "接收错误信息的用户 UID",
+        "hint": "填写目标用户 UID；插件会按 wecom:friend:{uid} 主动发送错误信息。"
+      },
+      "include_traceback": {
+        "type": "bool",
+        "description": "是否包含完整 traceback",
+        "default": true
+      },
+      "notify_user": {
+        "type": "bool",
+        "description": "命令处理报错时是否提示当前用户已通知管理员",
+        "default": true
+      },
+      "max_length": {
+        "type": "int",
+        "description": "错误消息最大长度，超出后截断，0 表示不限制",
+        "default": 600
+      }
+    }
   }
 }

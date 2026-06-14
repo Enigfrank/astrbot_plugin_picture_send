@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +11,7 @@ if str(_plugin_dir) not in sys.path:
     sys.path.insert(0, str(_plugin_dir))
 
 from astrbot.api import logger
-from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.star import Context, Star, register
 
 from config import (
@@ -18,6 +19,10 @@ from config import (
     DEFAULT_COMPRESSION_MAX_HEIGHT,
     DEFAULT_COMPRESSION_MAX_WIDTH,
     DEFAULT_COMPRESSION_QUALITY,
+    DEFAULT_ERROR_FORWARD_ENABLED,
+    DEFAULT_ERROR_FORWARD_INCLUDE_TRACEBACK,
+    DEFAULT_ERROR_FORWARD_MAX_LENGTH,
+    DEFAULT_ERROR_FORWARD_NOTIFY_USER,
     DEFAULT_LOG_TEMPLATE,
     DEFAULT_STATS_FILE_NAME,
     HOMEWORK_BASE_DIR,
@@ -73,6 +78,21 @@ class MyPlugin(Star):
         self._compression_max_width = int(compression.get("max_width", DEFAULT_COMPRESSION_MAX_WIDTH))
         self._compression_max_height = int(compression.get("max_height", DEFAULT_COMPRESSION_MAX_HEIGHT))
 
+        error_forward = self.config.get("error_forward", {}) or {}
+        self._error_forward_enabled = bool(
+            error_forward.get("enabled", DEFAULT_ERROR_FORWARD_ENABLED)
+        )
+        self._error_forward_target_uid = clean_text(error_forward.get("target_uid", ""))
+        self._error_forward_include_traceback = bool(
+            error_forward.get("include_traceback", DEFAULT_ERROR_FORWARD_INCLUDE_TRACEBACK)
+        )
+        self._error_forward_notify_user = bool(
+            error_forward.get("notify_user", DEFAULT_ERROR_FORWARD_NOTIFY_USER)
+        )
+        self._error_forward_max_length = int(
+            error_forward.get("max_length", DEFAULT_ERROR_FORWARD_MAX_LENGTH) or 0
+        )
+
         self._http = HttpClient()
         self._wecom = WecomClient(
             corp_id=self._wecom_corp_id,
@@ -100,6 +120,19 @@ class MyPlugin(Star):
     @filter.command("homework")
     async def homework(self, event: AstrMessageEvent):
         """发送作业图片.指令: homework"""
+        try:
+            async for result in self._homework_impl(event):
+                yield result
+        except Exception as exc:
+            logger.exception("homework 命令处理失败")
+            forwarded = await self._forward_error(exc, event, "homework")
+            if self._error_forward_notify_user:
+                if forwarded:
+                    yield event.plain_result("插件处理出错，已通知管理员。")
+                else:
+                    yield event.plain_result("插件处理出错，请联系管理员。")
+
+    async def _homework_impl(self, event: AstrMessageEvent):
         platform = clean_text(event.get_platform_name()).lower()
         if platform != "wecom":
             yield event.plain_result("本插件仅支持企业微信(wecom)")
@@ -209,6 +242,75 @@ class MyPlugin(Star):
             lines.append(f"{idx}. {u['user_name']} ({u['user_id']}): {u['total_count']} 次")
 
         yield event.plain_result("\n".join(lines))
+
+    async def _forward_error(
+        self,
+        exc: Exception,
+        event: AstrMessageEvent | None = None,
+        command_name: str = "unknown",
+    ) -> bool:
+        if not self._error_forward_enabled or not self._error_forward_target_uid:
+            return False
+        if getattr(self, "_error_forwarding", False):
+            return False
+
+        self._error_forwarding = True
+        try:
+            session = self._build_error_forward_session()
+            message = self._format_error_message(exc, event, command_name)
+            chain = MessageChain().message(message)
+            return bool(await self.context.send_message(session, chain))
+        except Exception as forward_exc:
+            logger.warning("错误转发失败: %s", forward_exc)
+            return False
+        finally:
+            self._error_forwarding = False
+
+    def _build_error_forward_session(self) -> str:
+        if self._error_forward_target_uid.count(":") >= 2:
+            return self._error_forward_target_uid
+        return f"wecom:friend:{self._error_forward_target_uid}"
+
+    def _format_error_message(
+        self,
+        exc: Exception,
+        event: AstrMessageEvent | None,
+        command_name: str,
+    ) -> str:
+        platform = "unknown"
+        user_id = "unknown"
+        user_name = "未知用户"
+        unified_msg_origin = "unknown"
+        request_time = format_request_time(None)
+
+        if event is not None:
+            platform = clean_text(event.get_platform_name()) or platform
+            user_id = self._get_user_id(event)
+            user_name = clean_text(event.get_sender_name()) or user_name
+            unified_msg_origin = clean_text(getattr(event, "unified_msg_origin", "")) or unified_msg_origin
+            request_time = format_request_time(
+                getattr(getattr(event, "message_obj", None), "timestamp", None)
+            )
+
+        lines = [
+            "⚠️ 作业插件出现错误",
+            f"命令: {command_name}",
+            f"平台: {platform}",
+            f"触发用户: {user_name} ({user_id})",
+            f"会话: {unified_msg_origin}",
+            f"时间: {request_time}",
+            f"异常: {type(exc).__name__}: {exc}",
+        ]
+
+        if self._error_forward_include_traceback:
+            detail = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
+            if detail:
+                lines.extend(["", "Traceback:", detail])
+
+        message = "\n".join(lines)
+        if self._error_forward_max_length > 20 and len(message) > self._error_forward_max_length:
+            return message[: self._error_forward_max_length - 20] + "\n...（已截断）"
+        return message
 
     def _resolve_homework_images(self) -> list[str]:
         if not HOMEWORK_BASE_DIR.exists() or not HOMEWORK_BASE_DIR.is_dir():
